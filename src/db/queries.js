@@ -1,8 +1,28 @@
 const { pool } = require('./pool');
 const { expandirAbreviacoes, gerarCondicoesBuscaComRanking } = require('../../abreviacoes');
 
-async function buscarPrecosEOfertas(embalagemIds, unidadeNegocioId) {
+function toFloatOrNull(valor) {
+  const numero = parseFloat(valor);
+  return Number.isNaN(numero) ? null : numero;
+}
+
+function calcularPrecoFinalOfertaCaderno(oferta, precoAtual) {
+  if (oferta.tipooferta === 'P' && oferta.preco_fixo !== null) {
+    return oferta.preco_fixo;
+  }
+
+  if (oferta.tipooferta === 'D' && oferta.preco_com_desconto !== null) {
+    return oferta.preco_com_desconto;
+  }
+
+  return precoAtual;
+}
+
+async function buscarPrecosEOfertas(embalagemIds, unidadeNegocioId, cadernoOfertaId = null) {
   console.log(`\n[PREÇOS] Buscando preços e ofertas para ${embalagemIds.length} embalagens...`);
+  if (cadernoOfertaId) {
+    console.log(`[PREÇOS] Caderno de oferta solicitado: ${cadernoOfertaId}`);
+  }
 
   if (embalagemIds.length === 0) {
     return {};
@@ -33,6 +53,7 @@ async function buscarPrecosEOfertas(embalagemIds, unidadeNegocioId) {
         mo.precounitariocomdesconto as preco_com_desconto,
         mo.vigenciainicio as oferta_inicio,
         mo.vigenciatermino as oferta_fim,
+        mo.cadernoofertaid as caderno_oferta_id,
         
         -- Caderno de oferta relacionado
         co.nome as nome_caderno_oferta,
@@ -90,27 +111,120 @@ async function buscarPrecosEOfertas(embalagemIds, unidadeNegocioId) {
     const precosMap = {};
     resultado.rows.forEach(row => {
       precosMap[row.embalagem_id] = {
-        preco_referencial_geral: parseFloat(row.preco_referencial_geral) || null,
-        preco_venda_geral: parseFloat(row.preco_venda_geral) || null,
-        markup_geral: parseFloat(row.markup_geral) || null,
-        preco_referencial_loja: parseFloat(row.preco_referencial_loja) || null,
-        preco_venda_loja: parseFloat(row.preco_venda_loja) || null,
-        markup_loja: parseFloat(row.markup_loja) || null,
-        plugpharma_preco_controlado: parseFloat(row.plugpharmaprecocontrolado) || null,
-        preco_melhor_oferta: parseFloat(row.preco_melhor_oferta) || null,
-        desconto_oferta_percentual: parseFloat(row.desconto_oferta_percentual) || null,
-        preco_sem_desconto: parseFloat(row.preco_sem_desconto) || null,
-        preco_com_desconto: parseFloat(row.preco_com_desconto) || null,
+        preco_referencial_geral: toFloatOrNull(row.preco_referencial_geral),
+        preco_venda_geral: toFloatOrNull(row.preco_venda_geral),
+        markup_geral: toFloatOrNull(row.markup_geral),
+        preco_referencial_loja: toFloatOrNull(row.preco_referencial_loja),
+        preco_venda_loja: toFloatOrNull(row.preco_venda_loja),
+        markup_loja: toFloatOrNull(row.markup_loja),
+        plugpharma_preco_controlado: toFloatOrNull(row.plugpharmaprecocontrolado),
+        preco_melhor_oferta: toFloatOrNull(row.preco_melhor_oferta),
+        desconto_oferta_percentual: toFloatOrNull(row.desconto_oferta_percentual),
+        preco_sem_desconto: toFloatOrNull(row.preco_sem_desconto),
+        preco_com_desconto: toFloatOrNull(row.preco_com_desconto),
         oferta_inicio: row.oferta_inicio,
         oferta_fim: row.oferta_fim,
         nome_caderno_oferta: row.nome_caderno_oferta,
+        caderno_oferta_id: row.caderno_oferta_id,
+        caderno_oferta_id_solicitado: cadernoOfertaId,
         tipo_oferta: row.tipooferta,
         leve: row.leve,
         pague: row.pague,
-        preco_final_venda: parseFloat(row.preco_final_venda) || null,
-        tem_oferta_ativa: row.tem_oferta_ativa || false
+        desconto_leve_pague: null,
+        preco_final_venda: toFloatOrNull(row.preco_final_venda),
+        tem_oferta_ativa: row.tem_oferta_ativa || false,
+        origem_oferta: row.tem_oferta_ativa ? 'melhoroferta' : null,
+        ofertas_caderno: []
       };
     });
+
+    if (cadernoOfertaId) {
+      const cadernoParamIdx = embalagemIds.length + 1;
+      const ofertasCaderno = await pool.query(`
+        SELECT
+          em.id as embalagem_id,
+          p.descricao as produto,
+          em.codigobarras as ean,
+          em.precovenda as preco_normal,
+          co.nome as caderno,
+          co.id as caderno_id,
+          ic.tipooferta,
+          ic.descontooferta as desconto_pct,
+          ROUND(em.precovenda * (1 - ic.descontooferta / 100), 2) as preco_com_desconto,
+          ic.leve,
+          ic.pague,
+          ic.descontolevepague,
+          ic.precooferta as preco_fixo
+        FROM itemcadernooferta ic
+        JOIN embalagem em ON em.id = ic.embalagemid
+        JOIN produto p ON p.id = em.produtoid
+        JOIN cadernooferta co ON co.id = ic.cadernoofertaid
+        WHERE em.id IN (${placeholders})
+          AND co.status = 'A'
+          AND co.id = $${cadernoParamIdx}
+        ORDER BY em.id, ic.tipooferta
+      `, [...embalagemIds, cadernoOfertaId]);
+
+      const ofertasPorEmbalagem = {};
+      ofertasCaderno.rows.forEach(row => {
+        const oferta = {
+          produto: row.produto,
+          ean: row.ean,
+          preco_normal: toFloatOrNull(row.preco_normal),
+          caderno: row.caderno,
+          caderno_id: row.caderno_id,
+          tipo_oferta: row.tipooferta,
+          desconto_pct: toFloatOrNull(row.desconto_pct),
+          preco_com_desconto: toFloatOrNull(row.preco_com_desconto),
+          leve: row.leve,
+          pague: row.pague,
+          desconto_leve_pague: toFloatOrNull(row.descontolevepague),
+          preco_fixo: toFloatOrNull(row.preco_fixo)
+        };
+
+        if (!ofertasPorEmbalagem[row.embalagem_id]) {
+          ofertasPorEmbalagem[row.embalagem_id] = [];
+        }
+
+        ofertasPorEmbalagem[row.embalagem_id].push(oferta);
+      });
+
+      Object.entries(ofertasPorEmbalagem).forEach(([embalagemId, ofertas]) => {
+        const precoInfo = precosMap[embalagemId];
+        if (!precoInfo || ofertas.length === 0) {
+          return;
+        }
+
+        const ofertaPrincipal = ofertas.find(oferta => oferta.tipo_oferta === 'P')
+          || ofertas.find(oferta => oferta.tipo_oferta === 'D')
+          || ofertas[0];
+        const precoFinalOferta = calcularPrecoFinalOfertaCaderno(
+          {
+            tipooferta: ofertaPrincipal.tipo_oferta,
+            preco_fixo: ofertaPrincipal.preco_fixo,
+            preco_com_desconto: ofertaPrincipal.preco_com_desconto
+          },
+          precoInfo.preco_final_venda
+        );
+
+        precoInfo.preco_melhor_oferta = precoFinalOferta;
+        precoInfo.desconto_oferta_percentual = ofertaPrincipal.desconto_pct;
+        precoInfo.preco_sem_desconto = ofertaPrincipal.preco_normal;
+        precoInfo.preco_com_desconto = ofertaPrincipal.preco_com_desconto;
+        precoInfo.nome_caderno_oferta = ofertaPrincipal.caderno;
+        precoInfo.caderno_oferta_id = ofertaPrincipal.caderno_id;
+        precoInfo.tipo_oferta = ofertaPrincipal.tipo_oferta;
+        precoInfo.leve = ofertaPrincipal.leve;
+        precoInfo.pague = ofertaPrincipal.pague;
+        precoInfo.desconto_leve_pague = ofertaPrincipal.desconto_leve_pague;
+        precoInfo.preco_final_venda = precoFinalOferta;
+        precoInfo.tem_oferta_ativa = true;
+        precoInfo.origem_oferta = 'caderno_solicitado';
+        precoInfo.ofertas_caderno = ofertas;
+      });
+
+      console.log(`[PREÇOS] Caderno solicitado retornou ${ofertasCaderno.rows.length} oferta(s) ativa(s)`);
+    }
 
     console.log(`[PREÇOS] ✅ Encontrados preços para ${Object.keys(precosMap).length} embalagens`);
     const comOferta = Object.values(precosMap).filter(p => p.tem_oferta_ativa).length;
@@ -410,7 +524,7 @@ async function buscarPorPrincipioAtivoIds(principioIds, formaFarmaceutica, varia
   }
 }
 
-async function verificarDisponibilidade(produtos, unidadeNegocioId) {
+async function verificarDisponibilidade(produtos, unidadeNegocioId, cadernoOfertaId = null) {
   console.log(`\n[ETAPA 3] Verificando DISPONIBILIDADE de ${produtos.length} produtos...`);
 
   if (produtos.length === 0) {
@@ -436,7 +550,7 @@ async function verificarDisponibilidade(produtos, unidadeNegocioId) {
       estoqueMap[row.embalagemid] = row.estoque_disponivel;
     });
 
-    const precosMap = await buscarPrecosEOfertas(embalagemIds, unidadeNegocioId);
+    const precosMap = await buscarPrecosEOfertas(embalagemIds, unidadeNegocioId, cadernoOfertaId);
 
     produtos.forEach(produto => {
       produto.estoque_disponivel = estoqueMap[produto.embalagem_id] || 0;

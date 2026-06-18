@@ -9,6 +9,15 @@ const router = express.Router();
 
 const UNIDADE_NEGOCIO_ID_PADRAO = parseInt(process.env.UNIDADE_NEGOCIO_ID || '65984');
 
+function normalizarIdOpcional(valor) {
+  if (valor === undefined || valor === null || valor === '') {
+    return null;
+  }
+
+  const id = Number.parseInt(valor, 10);
+  return Number.isInteger(id) && id > 0 ? id : NaN;
+}
+
 function descreverProdutoParaLog(produto) {
   if (!produto) {
     return 'produto indefinido';
@@ -66,9 +75,16 @@ function logDistribuicao(etapa, produtos, campo) {
 router.post('/api/buscar-medicamentos', async (req, res) => {
   try {
     const { query, unidade_negocio_id } = req.body;
+    const cadernoOfertaId = normalizarIdOpcional(
+      req.body.caderno_oferta_id ?? req.body.cadernoOfertaId ?? req.body.caderno_id
+    );
 
     if (!query || query.trim() === '') {
       return res.status(400).json({ erro: 'Query vazia' });
+    }
+
+    if (Number.isNaN(cadernoOfertaId)) {
+      return res.status(400).json({ erro: 'caderno_oferta_id inválido' });
     }
 
     const unidadeNegocioId = unidade_negocio_id || UNIDADE_NEGOCIO_ID_PADRAO;
@@ -77,6 +93,7 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
     console.log(`\n========================================`);
     console.log(`[BUSCA] Termo: "${termoBusca}"`);
     console.log(`[BUSCA] Unidade Negócio ID: ${unidadeNegocioId}`);
+    console.log(`[BUSCA] Caderno Oferta ID: ${cadernoOfertaId || 'não informado'}`);
     console.log(`========================================`);
 
     const { principioAtivoBusca, formaFarmaceutica, variacoesForma } = extrairFormaFarmaceutica(termoBusca);
@@ -170,7 +187,7 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
     logResumoProdutos('Produtos combinados apos merge e ordenacao SQL', produtos);
 
     if (produtos.length > 0) {
-      produtos = await verificarDisponibilidade(produtos, unidadeNegocioId);
+      produtos = await verificarDisponibilidade(produtos, unidadeNegocioId, cadernoOfertaId);
       console.log(`[INFO] Após verificação de estoque: ${produtos.length} produtos`);
       logResumoProdutos('Produtos apos filtro de estoque', produtos);
     }
@@ -271,6 +288,7 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
         busca_ambigua: clarificacao.precisa_clarificar,
         total_produtos: produtos.length,
         unidade_negocio_id: unidadeNegocioId,
+        caderno_oferta_id: cadernoOfertaId,
         classificacoes_disponiveis: classificacoesDisponiveis,
         classificacoes_nao_mapeadas: classificacoesNaoMapeadas
       },
@@ -297,9 +315,14 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
           preco_com_desconto: p.precos?.preco_com_desconto || null,
           desconto_percentual: p.precos?.desconto_oferta_percentual || null,
           nome_caderno_oferta: p.precos?.nome_caderno_oferta || null,
+          caderno_oferta_id: p.precos?.caderno_oferta_id || null,
+          caderno_oferta_id_solicitado: p.precos?.caderno_oferta_id_solicitado || null,
+          origem_oferta: p.precos?.origem_oferta || null,
           tipo_oferta: p.precos?.tipo_oferta || null,
           leve: p.precos?.leve || null,
           pague: p.precos?.pague || null,
+          desconto_leve_pague: p.precos?.desconto_leve_pague || null,
+          ofertas_caderno: p.precos?.ofertas_caderno || [],
           oferta_inicio: p.precos?.oferta_inicio || null,
           oferta_fim: p.precos?.oferta_fim || null,
           preco_referencial_geral: p.precos?.preco_referencial_geral || null,
